@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<!--
+==========================================================================
+  AVIAC — INVOICE / PO GENERATOR              single file, no build step
+==========================================================================
+  QUICK EDIT MAP — search for these markers to jump to what you want:
+
+    [EDIT-COLORS]    the colour palette (dark UI + the spectral band)
+    [EDIT-DEFAULTS]  your company name, GSTIN, PAN, phone, email, bank
+    [EDIT-DOCTYPES]  wording for Invoice / Proforma / Quote / PO
+    [EDIT-CURRENCY]  currencies and how amount-in-words is spelled
+    [EDIT-PAPER]     the printed sheet's layout and typography
+    [EDIT-RENDER]    what actually gets drawn on the sheet
+    [EDIT-PDF]       PDF export settings
+
+  HOW IT WORKS: every field lives in the left panel. On any keystroke,
+  render() reads all fields straight from the DOM and rebuilds the sheet
+  HTML on the right. There is no framework and no saved state — reload
+  the page and you are back to the defaults below.
+==========================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aviac — Invoice Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<!-- QR generator. If it fails to load the QR is simply skipped, nothing breaks. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<style>
+:root{
+  /* [EDIT-COLORS] ------------------------------------------------------
+     shell*  = dark background of the editor panel
+     line    = borders inside the editor
+     steel   = dim label text in the editor
+     readout = the amber accent (buttons, focus rings)
+     ink/muted/rule/paper = colours of the PRINTED sheet only
+     b1..b8  = the 8-band spectral strip under the invoice header,
+               one colour per band of Aviac's camera. Change these to
+               re-brand the sheet, or delete the .band div in render(). */
+  --shell:#0E141B; --shell-2:#151E27; --shell-3:#1D2833;
+  --line:#26333F; --steel:#8FA3B4; --steel-dim:#61748470;
+  --readout:#E8B23A; --ok:#3FB98C;
+  --ink:#0F1720; --muted:#5D6D7C; --rule:#E3E8ED; --paper:#fff;
+  --b1:#1E63D6; --b2:#12A67A; --b3:#C9C21F; --b4:#E0902F; --b5:#D6453C; --b6:#B0399B; --b7:#7A3FD1; --b8:#3A3A6E;
+  /* sheet size in CSS pixels at 96dpi — swapped by the Page size dropdown */
+  --paper-w:794px; --paper-h:1123px;
+  --sans:'Archivo',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--shell);color:#E6EEF5;font-family:var(--sans);-webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:minmax(340px,420px) 1fr;min-height:100vh}
+
+/* ---------- editor ---------- */
+.editor{background:var(--shell);border-right:1px solid var(--line);padding:0 0 60px;overflow-y:auto;max-height:100vh}
+.brandbar{position:sticky;top:0;z-index:5;background:var(--shell);border-bottom:1px solid var(--line);padding:16px 20px 12px}
+.brandbar h1{margin:0;font-size:15px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
+.brandbar p{margin:4px 0 10px;font-size:11.5px;color:var(--steel);letter-spacing:.02em}
+.spectrum{height:3px;display:flex;border-radius:2px;overflow:hidden}
+.spectrum i{flex:1}
+sec, section{display:block}
+.grp{border-bottom:1px solid var(--line);padding:18px 20px}
+.grp>h2{margin:0 0 14px;font-size:10.5px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--steel);display:flex;align-items:center;gap:8px}
+.grp>h2:after{content:"";flex:1;height:1px;background:var(--line)}
+label{display:block;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--steel);margin:0 0 5px}
+input,select,textarea{width:100%;background:var(--shell-2);border:1px solid var(--line);border-radius:6px;color:#EAF2F8;
+  font-family:var(--sans);font-size:13px;padding:9px 10px;outline:none;transition:border-color .15s,background .15s}
+input:focus,select:focus,textarea:focus{border-color:var(--readout);background:var(--shell-3)}
+input[type=number],.num{font-family:var(--mono);letter-spacing:-.01em}
+textarea{resize:vertical;min-height:62px;line-height:1.45}
+.row{display:grid;gap:10px;margin-bottom:11px}
+.r2{grid-template-columns:1fr 1fr}.r3{grid-template-columns:1fr 1fr 1fr}
+.f{margin-bottom:11px}
+.f:last-child{margin-bottom:0}
+.hint{font-size:10.5px;color:var(--steel);margin-top:6px;line-height:1.5}
+
+.logobox{display:flex;gap:12px;align-items:center}
+.drop{flex:1;border:1px dashed var(--line);border-radius:8px;padding:14px;text-align:center;cursor:pointer;transition:.15s;background:var(--shell-2)}
+.drop:hover{border-color:var(--readout);color:#fff}
+.drop span{font-size:11.5px;color:var(--steel);letter-spacing:.04em}
+.thumb{width:64px;height:64px;border:1px solid var(--line);border-radius:8px;background:#fff;display:none;align-items:center;justify-content:center;padding:6px;flex:0 0 64px}
+.thumb img{max-width:100%;max-height:100%;object-fit:contain}
+
+/* items */
+.items{display:flex;flex-direction:column;gap:8px}
+.item{background:var(--shell-2);border:1px solid var(--line);border-radius:8px;padding:10px}
+.item .top{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.item .idx{font-family:var(--mono);font-size:11px;color:var(--readout);flex:0 0 auto}
+.item .lineamt{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--steel)}
+.item .grid{display:grid;grid-template-columns:1fr 68px 1fr;gap:8px;margin-top:8px}
+.x{background:none;border:1px solid var(--line);color:var(--steel);border-radius:5px;width:24px;height:24px;cursor:pointer;font-size:14px;line-height:1;padding:0}
+.x:hover{border-color:#D6453C;color:#F08A84}
+.btn{border:1px solid var(--line);background:var(--shell-2);color:#E6EEF5;border-radius:7px;padding:10px 14px;
+  font-family:var(--sans);font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--readout);color:#fff}
+.btn.wide{width:100%;margin-top:10px}
+.btn.go{background:var(--readout);border-color:var(--readout);color:#171208}
+.btn.go:hover{background:#F2C25A;border-color:#F2C25A;color:#171208}
+.btnrow{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+
+/* ---------- preview + [EDIT-PAPER] the printed sheet -----------------
+   Everything under #paper is what lands in the PDF. Sizes are in CSS
+   pixels at 96dpi: A4 = 794 x 1123, US Letter = 816 x 1056.          */
+.stage{background:#080C11;padding:28px;overflow:auto;max-height:100vh;
+  background-image:radial-gradient(circle at 1px 1px, #16202B 1px, transparent 0);background-size:22px 22px}
+.stagebar{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}
+.stagebar .tag{font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--steel)}
+.zoom{margin-left:auto;display:flex;gap:6px;align-items:center}
+.zoom button{width:26px;height:26px}
+.zoom .lvl{font-family:var(--mono);font-size:11px;color:var(--steel);min-width:38px;text-align:center}
+.paperwrap{display:flex;justify-content:center}
+#scaler{transform-origin:top center}
+
+#paper{width:var(--paper-w);min-height:var(--paper-h);background:var(--paper);color:var(--ink);
+  padding:52px 56px;box-shadow:0 24px 70px rgba(0,0,0,.55);position:relative;font-size:12.5px;line-height:1.55}
+/* Header = [logo] [company block] [INVOICE + numbers].
+   min-width:0 on the middle column is what stops long GSTIN/phone/email
+   strings from pushing the title off the page when a logo is added. */
+#paper .hdr{display:flex;gap:20px;align-items:flex-start}
+#paper .logo{flex:0 0 auto}
+#paper .logo img{display:block;object-fit:contain}
+#paper .co{flex:1 1 auto;min-width:0}
+#paper .co h3{margin:0;font-size:19px;font-weight:700;letter-spacing:-.01em;overflow-wrap:anywhere}
+#paper .co .addr{margin-top:6px;color:var(--muted);font-size:11.5px;white-space:pre-line;line-height:1.5;overflow-wrap:anywhere}
+#paper .co .meta{margin-top:6px;color:var(--muted);font-size:10.5px;font-family:var(--mono);line-height:1.65;overflow-wrap:anywhere}
+#paper .co .meta div{max-width:100%}
+#paper .title{flex:0 0 auto;margin-left:auto;text-align:right;padding-left:10px}
+#paper .title .word{font-size:26px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;line-height:1}
+#paper .title .sub{margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
+#paper .title .sub b{color:var(--ink);font-weight:500}
+.band{height:4px;display:flex;margin:20px 0 0;border-radius:2px;overflow:hidden}
+.band i{flex:1}
+.band.bw i{background:#1a222b !important;opacity:.14}
+.band.bw i:nth-child(odd){opacity:.3}
+
+.parties{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:26px}
+.pt .k{font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.pt .n{font-weight:600;font-size:13.5px}
+.pt .a{color:var(--muted);font-size:11.5px;white-space:pre-line;margin-top:3px;line-height:1.5}
+.pt .g{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px}
+
+table.li{width:100%;border-collapse:collapse;margin-top:26px}
+table.li th{text-align:left;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;padding:0 8px 8px;border-bottom:1.5px solid var(--ink)}
+table.li td{padding:11px 8px;border-bottom:1px solid var(--rule);vertical-align:top;font-size:12px}
+table.li tr,.foot,.words,.sign,.tot,.parties{page-break-inside:avoid;break-inside:avoid}
+table.li th:first-child,table.li td:first-child{padding-left:0}
+table.li th:last-child,table.li td:last-child{padding-right:0}
+.rt{text-align:right}
+.desc{font-weight:500}
+.desc small{display:block;color:var(--muted);font-weight:400;font-size:11px;margin-top:2px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+.foot{display:grid;grid-template-columns:1fr 300px;gap:32px;margin-top:22px}
+.tot .l{display:flex;justify-content:space-between;padding:6px 0;font-size:12px;color:var(--muted)}
+.tot .l b{color:var(--ink);font-weight:500}
+.tot .grand{display:flex;justify-content:space-between;align-items:baseline;margin-top:8px;padding:12px 0 0;border-top:1.5px solid var(--ink)}
+.tot .grand span{font-size:10px;letter-spacing:.16em;text-transform:uppercase}
+.tot .grand b{font-family:var(--mono);font-size:20px;font-weight:700;letter-spacing:-.02em}
+.words{margin-top:16px;padding:12px 14px;background:#F6F8FA;border-left:3px solid var(--b2);font-size:11.5px;line-height:1.55}
+.words .k{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+.words b{font-weight:600}
+.bw .words{border-left-color:#2a343d}
+.notes .k{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.notes p{margin:0 0 14px;color:var(--muted);font-size:11.5px;white-space:pre-line;line-height:1.55}
+.sign{margin-top:44px;text-align:right}
+.sign .line{display:inline-block;width:190px;border-top:1px solid var(--ink);padding-top:6px;font-size:11px;color:var(--muted)}
+/* verification strip: QR + fingerprint + system-generated notice */
+.auth{display:flex;gap:14px;align-items:flex-start;margin-top:26px;padding-top:14px;border-top:1px solid var(--rule);margin-bottom:46px}
+.auth .qr{flex:0 0 auto;width:72px;height:72px}
+.auth .qr img{width:72px;height:72px;display:block;image-rendering:pixelated}
+.auth .body{flex:1 1 auto;min-width:0}
+.auth .k{font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+.auth .code{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;color:var(--ink);overflow-wrap:anywhere}
+.auth .sys{margin-top:7px;font-size:10.5px;color:var(--muted);font-style:italic;line-height:1.5}
+.stamp{position:absolute;left:56px;right:56px;bottom:34px;display:flex;justify-content:space-between;
+  font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#9AA7B2;border-top:1px solid var(--rule);padding-top:10px}
+
+@media(max-width:1000px){
+  .app{grid-template-columns:1fr}
+  .editor{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
+  .stage{max-height:none;padding:18px}
+}
+@media print{
+  body{background:#fff}
+  .editor,.stagebar{display:none !important}
+  .app{display:block}.stage{padding:0;background:#fff;max-height:none;overflow:visible}
+  #scaler{transform:none !important}
+  #paper{box-shadow:none;width:100%;min-height:0}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none !important}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ============ EDITOR ============ -->
+<div class="editor" id="editor">
+  <div class="brandbar">
+    <h1>Invoice Generator</h1>
+    <p>Aviac Technologies · edits appear live on the sheet</p>
+    <div class="spectrum"><i style="background:var(--b1)"></i><i style="background:var(--b2)"></i><i style="background:var(--b3)"></i><i style="background:var(--b4)"></i><i style="background:var(--b5)"></i><i style="background:var(--b6)"></i><i style="background:var(--b7)"></i><i style="background:var(--b8)"></i></div>
+  </div>
+
+  <!-- [EDIT-DEFAULTS] Everything below is just a normal HTML form.
+       To change what a field starts with, edit its value="..." /
+       the text inside <textarea>. To add a NEW field: copy a block,
+       give the input a unique id, then print it inside render(). -->
+
+  <section class="grp">
+    <h2>Logo</h2>
+    <div class="logobox">
+      <div class="thumb" id="thumb"><img id="thumbImg" alt=""></div>
+      <div class="drop" id="drop"><span>Choose a logo file (PNG, JPG or SVG)</span></div>
+    </div>
+    <input type="file" id="logoFile" accept="image/*" hidden>
+    <div class="row r2" style="margin-top:11px">
+      <div><label>Logo height</label><select id="logoH"><option value="40">Small</option><option value="56" selected>Medium</option><option value="76">Large</option></select></div>
+      <div><label>&nbsp;</label><button class="btn" id="logoClear" style="width:100%">Remove logo</button></div>
+    </div>
+  </section>
+
+  <section class="grp">
+    <h2>Your business</h2>
+    <div class="f"><label>Business name</label><input id="fromName" value="Aviac Technologies Private Limited"></div>
+    <div class="f"><label>Address</label><textarea id="fromAddr">Hyderabad, Telangana
+India</textarea></div>
+    <div class="row r2">
+      <div><label>GSTIN</label><input id="fromGst" value="36AAVCA1943L1Z5"></div>
+      <div><label>PAN / IEC</label><input id="fromPan" value="AAVCA1943L"></div>
+    </div>
+    <div class="row r2">
+      <div><label>Phone</label><input id="fromPhone" value="+91 99891 22218"></div>
+      <div><label>Email</label><input id="fromMail" value="sachin@aviac.in"></div>
+    </div>
+  </section>
+
+  <section class="grp">
+    <h2 id="partyHead">Bill to</h2>
+    <div class="f"><label id="lblToName">Client name</label><input id="toName" value="Client name"></div>
+    <div class="f"><label>Address</label><textarea id="toAddr" placeholder="Street, city, state, PIN"></textarea></div>
+    <div class="row r2">
+      <div><label>GSTIN / Tax ID</label><input id="toGst" placeholder="Optional"></div>
+      <div><label id="lblPos">Place of supply</label><input id="pos" placeholder="Telangana (36)"></div>
+    </div>
+    <div class="f"><label id="lblShip">Ship to (if different)</label><textarea id="shipTo" placeholder="Leave blank to hide this block"></textarea></div>
+  </section>
+
+  <section class="grp">
+    <h2>Document details</h2>
+    <div class="f"><label>Document type</label><select id="docType">
+      <option value="invoice" selected>Tax invoice</option>
+      <option value="proforma">Proforma invoice</option>
+      <option value="quote">Quotation</option>
+      <option value="po">Purchase order</option>
+    </select></div>
+    <div class="row r2">
+      <div><label id="lblNo">Invoice no.</label><input id="invNo" value="AVI-2026-001"></div>
+      <div><label>Currency</label><select id="cur">
+        <option value="INR" selected>INR — Rupees</option>
+        <option value="USD">USD — Dollars</option>
+        <option value="EUR">EUR — Euros</option>
+        <option value="GBP">GBP — Pounds</option>
+      </select></div>
+    </div>
+    <div class="row r2">
+      <div><label id="lblDate">Invoice date</label><input type="date" id="invDate"></div>
+      <div><label id="lblDue">Due date</label><input type="date" id="dueDate"></div>
+    </div>
+    <div class="row r2">
+      <div><label>Reference / PO no.</label><input id="poNo" placeholder="Optional"></div>
+      <div><label>Date format</label><select id="dateFmt">
+        <option value="dmy" selected>25/08/2026</option>
+        <option value="long">25 Aug 2026</option>
+        <option value="mdy">08/25/2026</option>
+      </select></div>
+    </div>
+  </section>
+
+  <section class="grp">
+    <h2>Line items</h2>
+    <div class="items" id="items"></div>
+    <button class="btn wide" id="addItem">+ Add line item</button>
+  </section>
+
+  <section class="grp">
+    <h2>Tax &amp; adjustments</h2>
+    <div class="row r2">
+      <div><label>Tax type</label><select id="taxType">
+        <option value="intra" selected>CGST + SGST (same state)</option>
+        <option value="inter">IGST (other state)</option>
+        <option value="flat">Single tax / VAT</option>
+        <option value="none">No tax</option>
+      </select></div>
+      <div><label>Total tax rate %</label><input type="number" id="taxRate" value="18" min="0" step="0.01"></div>
+    </div>
+    <div class="row r3">
+      <div><label>Discount</label><input type="number" id="discVal" value="0" min="0" step="0.01"></div>
+      <div><label>Type</label><select id="discType"><option value="pct">%</option><option value="flat">Flat</option></select></div>
+      <div><label>Shipping / other</label><input type="number" id="shipVal" value="0" min="0" step="0.01"></div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:#E6EEF5;margin-top:4px">
+      <input type="checkbox" id="roundOff" style="width:auto" checked> Round the grand total to the nearest whole unit
+    </label>
+  </section>
+
+  <section class="grp">
+    <h2>Payment &amp; notes</h2>
+    <div class="f"><label>Bank / payment details</label><textarea id="bank" placeholder="Account name · A/c no. · IFSC · Bank, branch · UPI">Account name: Aviac Technologies Private Limited
+A/c no.: 570205000114
+IFSC: ICIC0005702
+Bank: ICICI Bank</textarea></div>
+    <div class="f"><label>Notes / terms</label><textarea id="terms">Payment due within 15 days of invoice date. Late payments may attract interest at 1.5% per month.</textarea></div>
+    <div class="f"><label>Signature label</label><input id="signLabel" value="For Aviac Technologies Private Limited"></div>
+  </section>
+
+  <section class="grp">
+    <h2>Authenticity</h2>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:#E6EEF5;margin-bottom:10px">
+      <input type="checkbox" id="sysGen" style="width:auto" checked> Print the system-generated notice
+    </label>
+    <div class="f"><label>Notice text</label><textarea id="sysText">This is a computer-generated document and does not require a physical signature.</textarea></div>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:#E6EEF5;margin-bottom:10px">
+      <input type="checkbox" id="showHash" style="width:auto" checked> Print a SHA-256 verification code
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:#E6EEF5">
+      <input type="checkbox" id="showQR" style="width:auto" checked> Print a QR code of the document summary
+    </label>
+    <div class="hint">The code is a fingerprint of this document's own contents — change any figure and it changes. It proves nothing to a tax officer; see the note in chat about IRN and DSC.</div>
+  </section>
+
+  <section class="grp">
+    <h2>PDF options</h2>
+    <div class="row r2">
+      <div><label>Page size</label><select id="pageSize"><option value="a4" selected>A4 (210 × 297 mm)</option><option value="letter">US Letter (8.5 × 11 in)</option></select></div>
+      <div><label>Quality</label><select id="pdfQ"><option value="2" selected>High (2×)</option><option value="3">Maximum (3×)</option><option value="1.5">Compact</option></select></div>
+    </div>
+    <div class="row r2">
+      <div><label>Colour</label><select id="inkMode"><option value="color" selected>Full colour</option><option value="bw">Black &amp; white</option></select></div>
+      <div><label>File name</label><input id="fname" placeholder="auto from invoice no."></div>
+    </div>
+    <div class="btnrow" style="margin-top:12px">
+      <button class="btn go" id="dlPdf">Download PDF</button>
+      <button class="btn" id="printBtn">Print / Save as PDF</button>
+    </div>
+    <div class="hint" id="status">Download PDF renders the sheet exactly as previewed. Print uses the browser dialog — pick “Save as PDF” there if the download is blocked.</div>
+  </section>
+</div>
+
+<!-- ============ PREVIEW ============ -->
+<div class="stage">
+  <div class="stagebar">
+    <span class="tag">Preview</span>
+    <span class="tag mono" id="sizeTag" style="color:#E8B23A">A4</span>
+    <div class="zoom">
+      <button class="btn" id="zOut" style="padding:0">–</button>
+      <span class="lvl" id="zLvl">80%</span>
+      <button class="btn" id="zIn" style="padding:0">+</button>
+    </div>
+  </div>
+  <div class="paperwrap"><div id="scaler"><div id="paper"></div></div></div>
+</div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+  var $=function(id){return document.getElementById(id)};  // shorthand
+
+  /* =====================================================================
+     [EDIT-DOCTYPES] One entry per document type in the dropdown.
+       word    text printed big at the top right
+       head    heading of the party section in the editor
+       partyK  label above the client/vendor block on the sheet
+       amtK    label above the big total in the top-right block
+       prefix  auto number prefix (AVI-PO-2026-001 etc.)
+       terms   default notes text loaded when you pick this type
+     Add a type: copy a block, give it a key, then add a matching
+     <option value="yourkey"> to the docType <select> above.
+     Switching type only overwrites number/terms/signature if you have
+     NOT edited them yourself.
+     ================================================================== */
+  var DOC={
+    invoice:{word:'Invoice',head:'Bill to',nameL:'Client name',noL:'Invoice no.',dateL:'Invoice date',dueL:'Due date',
+      partyK:'Billed to',posK:'Place of supply',amtK:'Amount due',shipK:'Ship to',dateK:'Date',dueK:'Due',refK:'Ref',
+      prefix:'AVI-2026-',sign:'For Aviac Technologies Private Limited',
+      terms:'Payment due within 15 days of invoice date. Late payments may attract interest at 1.5% per month.'},
+    proforma:{word:'Proforma Invoice',head:'Bill to',nameL:'Client name',noL:'Proforma no.',dateL:'Issue date',dueL:'Valid until',
+      partyK:'Billed to',posK:'Place of supply',amtK:'Amount payable',shipK:'Ship to',dateK:'Issued',dueK:'Valid till',refK:'Ref',
+      prefix:'AVI-PI-2026-',sign:'For Aviac Technologies Private Limited',
+      terms:'This is a proforma invoice, not a tax invoice. A tax invoice will be issued on receipt of payment. Prices hold until the validity date above.'},
+    quote:{word:'Quotation',head:'Quote to',nameL:'Client name',noL:'Quote no.',dateL:'Quote date',dueL:'Valid until',
+      partyK:'Prepared for',posK:'Place of supply',amtK:'Quoted value',shipK:'Site / location',dateK:'Date',dueK:'Valid till',refK:'Ref',
+      prefix:'AVI-Q-2026-',sign:'For Aviac Technologies Private Limited',
+      terms:'Quotation valid until the date above. Taxes as applicable. Work begins on written confirmation and receipt of the advance, if any.'},
+    po:{word:'Purchase Order',head:'Vendor',nameL:'Vendor / supplier name',noL:'PO no.',dateL:'Order date',dueL:'Deliver by',
+      partyK:'Vendor',posK:'Place of supply',amtK:'Order value',shipK:'Deliver to',dateK:'Ordered',dueK:'Deliver by',refK:'Quote ref',
+      prefix:'AVI-PO-2026-',sign:'For Aviac Technologies Private Limited',
+      terms:'Please confirm acceptance of this order in writing. Quote the PO number on all invoices, packing lists and correspondence. Goods remain subject to inspection on delivery; payment terms 30 days from receipt of a correct invoice.'}
+  };
+  /* [EDIT-CURRENCY] system:'in' spells 12,34,567 as Lakh/Crore;
+     'intl' spells 1,234,567 as Million. loc = Intl number formatting. */
+  var CUR={
+    INR:{sym:'₹',code:'INR',major:'Rupees',minor:'Paise',system:'in',loc:'en-IN'},
+    USD:{sym:'$',code:'USD',major:'Dollars',minor:'Cents',system:'intl',loc:'en-US'},
+    EUR:{sym:'€',code:'EUR',major:'Euros',minor:'Cents',system:'intl',loc:'en-IE'},
+    GBP:{sym:'£',code:'GBP',major:'Pounds',minor:'Pence',system:'intl',loc:'en-GB'}
+  };
+  var logoData='';
+
+  /* =====================================================================
+     [EDIT-VERIFY] SHA-256, implemented here rather than using the browser's
+     crypto.subtle because that is unavailable when the file is opened
+     straight from disk (file:// is not a "secure context" in Chrome).
+     Pure function: same invoice contents in, same 64-char fingerprint out.
+     ================================================================== */
+  function sha256(msg){
+    var K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+           0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+           0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+           0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+           0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+           0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+           0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+           0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    var H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    // UTF-8 encode
+    var b=[],i,c;
+    for(i=0;i<msg.length;i++){
+      c=msg.charCodeAt(i);
+      if(c<128) b.push(c);
+      else if(c<2048){ b.push(192|c>>6,128|c&63); }
+      else { b.push(224|c>>12,128|c>>6&63,128|c&63); }
+    }
+    var bitLen=b.length*8;
+    b.push(0x80); while(b.length%64!==56) b.push(0);
+    for(i=7;i>=0;i--) b.push((i<4? (bitLen/Math.pow(2,8*i))&255 : 0));
+    var rr=function(x,n){ return (x>>>n)|(x<<(32-n)); };
+    var w=new Array(64),a,bb,cc,d,e,f,g,h,t1,t2,j;
+    for(i=0;i<b.length;i+=64){
+      for(j=0;j<16;j++) w[j]=(b[i+4*j]<<24)|(b[i+4*j+1]<<16)|(b[i+4*j+2]<<8)|b[i+4*j+3];
+      for(j=16;j<64;j++){
+        var s0=rr(w[j-15],7)^rr(w[j-15],18)^(w[j-15]>>>3);
+        var s1=rr(w[j-2],17)^rr(w[j-2],19)^(w[j-2]>>>10);
+        w[j]=(w[j-16]+s0+w[j-7]+s1)|0;
+      }
+      a=H[0];bb=H[1];cc=H[2];d=H[3];e=H[4];f=H[5];g=H[6];h=H[7];
+      for(j=0;j<64;j++){
+        t1=(h+(rr(e,6)^rr(e,11)^rr(e,25))+((e&f)^(~e&g))+K[j]+w[j])|0;
+        t2=((rr(a,2)^rr(a,13)^rr(a,22))+((a&bb)^(a&cc)^(bb&cc)))|0;
+        h=g;g=f;f=e;e=(d+t1)|0;d=cc;cc=bb;bb=a;a=(t1+t2)|0;
+      }
+      H[0]=(H[0]+a)|0;H[1]=(H[1]+bb)|0;H[2]=(H[2]+cc)|0;H[3]=(H[3]+d)|0;
+      H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+    }
+    return H.map(function(x){ return ('00000000'+(x>>>0).toString(16)).slice(-8); }).join('');
+  }
+
+  /* ---------- number to words ------------------------------------
+     amountInWords() is what refreshes under the totals every time a
+     figure changes. It splits the amount into whole + 2 decimals and
+     spells each with the right system for the selected currency.    */
+  var ONES=['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
+  var TENS=['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+  function under100(n){ if(n<20) return ONES[n]; var t=TENS[Math.floor(n/10)], o=n%10; return o? t+'-'+ONES[o] : t; }
+  function under1000(n){ var h=Math.floor(n/100), r=n%100, s=''; if(h) s=ONES[h]+' Hundred'; if(r) s+= (s?' ':'')+under100(r); return s; }
+  function wordsIndian(n){
+    if(n===0) return 'Zero';
+    var parts=[], units=[[10000000,'Crore'],[100000,'Lakh'],[1000,'Thousand']];
+    for(var i=0;i<units.length;i++){ var v=Math.floor(n/units[i][0]); if(v){ parts.push((v>99?wordsIndian(v):under100(v))+' '+units[i][1]); n%=units[i][0]; } }
+    if(n) parts.push(under1000(n));
+    return parts.join(' ');
+  }
+  function wordsIntl(n){
+    if(n===0) return 'Zero';
+    var parts=[], units=[[1000000000,'Billion'],[1000000,'Million'],[1000,'Thousand']];
+    for(var i=0;i<units.length;i++){ var v=Math.floor(n/units[i][0]); if(v){ parts.push(under1000(v)+' '+units[i][1]); n%=units[i][0]; } }
+    if(n) parts.push(under1000(n));
+    return parts.join(' ');
+  }
+  function amountInWords(amt,c){
+    amt=Math.abs(Math.round(amt*100)/100);
+    var whole=Math.floor(amt), frac=Math.round((amt-whole)*100);
+    var f = c.system==='in'? wordsIndian : wordsIntl;
+    var s=c.major+' '+f(whole);
+    if(frac>0) s+=' and '+f(frac)+' '+c.minor;
+    return s+' Only';
+  }
+  function fmt(n,c){ try{ return new Intl.NumberFormat(c.loc,{minimumFractionDigits:2,maximumFractionDigits:2}).format(n); }catch(e){ return n.toFixed(2); } }
+  // joins the non-empty bits of a header line with a dot separator
+  function line(parts){ var t=parts.filter(Boolean).join(' \u00b7 '); return t?'<div>'+t+'</div>':''; }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[m]}); }
+  var MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function dmy(v){
+    if(!v) return '—';
+    var p=v.split('-'), f=$('dateFmt').value;
+    if(f==='long') return p[2]+' '+MON[parseInt(p[1],10)-1]+' '+p[0];
+    if(f==='mdy') return p[1]+'/'+p[2]+'/'+p[0];
+    return p[2]+'/'+p[1]+'/'+p[0];
+  }
+
+  /* ---------- line items -------------------------------------------
+     Rows live in the DOM, not in a JS array. itemRow() builds a row;
+     readItems() reads them all back on every render. That is why
+     typing never steals focus — nothing re-creates the inputs.      */
+  function itemRow(d){
+    d=d||{desc:'',hsn:'',qty:1,rate:0};
+    var el=document.createElement('div'); el.className='item';
+    el.innerHTML='<div class="top"><span class="idx"></span>'+
+      '<span class="lineamt">0.00</span>'+
+      '<button class="x" title="Remove line">×</button></div>'+
+      '<input data-f="desc" placeholder="Description of work or product" value="'+esc(d.desc)+'">'+
+      '<div class="grid">'+
+        '<input data-f="hsn" placeholder="HSN / SAC" value="'+esc(d.hsn)+'">'+
+        '<input data-f="qty" type="number" min="0" step="any" value="'+d.qty+'" placeholder="Qty">'+
+        '<input data-f="rate" type="number" min="0" step="any" value="'+d.rate+'" placeholder="Rate">'+
+      '</div>';
+    el.querySelector('.x').addEventListener('click',function(){
+      if($('items').children.length<=1) return;
+      el.remove(); render();
+    });
+    return el;
+  }
+  function readItems(){
+    return [].map.call($('items').children,function(el){
+      var g=function(f){ return el.querySelector('[data-f="'+f+'"]').value; };
+      var qty=parseFloat(g('qty'))||0, rate=parseFloat(g('rate'))||0;
+      return {desc:g('desc'),hsn:g('hsn'),qty:qty,rate:rate,amt:qty*rate};
+    });
+  }
+
+  /* ---------- render -------------------------------------------------
+     [EDIT-RENDER] The single function that draws the sheet.
+       1. read every field + all line items
+       2. do the maths (subtotal, discount, tax, shipping, round off)
+       3. rebuild #paper's HTML in one go
+     To change the printed layout, edit the template strings below.
+     To change the maths, edit the block right under this comment.   */
+  function render(){
+    var c=CUR[$('cur').value], items=readItems(), bw=$('inkMode').value==='bw', D=DOC[$('docType').value];
+    // ---- the maths, in the order a GST invoice expects it ----
+    var sub=items.reduce(function(a,i){return a+i.amt},0);          // sum of lines
+    var disc=$('discType').value==='pct' ? sub*(parseFloat($('discVal').value)||0)/100 : (parseFloat($('discVal').value)||0);
+    if(disc>sub) disc=sub;
+    var taxable=sub-disc;                                            // tax applies AFTER discount
+    var type=$('taxType').value, rate=type==='none'?0:(parseFloat($('taxRate').value)||0);
+    var tax=taxable*rate/100, ship=parseFloat($('shipVal').value)||0; // shipping is not taxed here
+    var total=taxable+tax+ship, roundAdj=0;
+    if($('roundOff').checked){ var r=Math.round(total); roundAdj=r-total; total=r; } // whole rupees
+
+    // line amounts in editor
+    [].forEach.call($('items').children,function(el,i){
+      el.querySelector('.idx').textContent=String(i+1).padStart(2,'0');
+      el.querySelector('.lineamt').textContent=c.sym+' '+fmt(items[i].amt,c);
+    });
+
+    var bands=''; for(var b=1;b<=8;b++) bands+='<i style="background:var(--b'+b+')"></i>';
+    var rows = items.filter(function(i){return i.desc||i.amt}).map(function(i,n){
+      return '<tr><td class="mono" style="color:var(--muted);width:26px">'+String(n+1).padStart(2,'0')+'</td>'+
+        '<td class="desc">'+(esc(i.desc)||'—')+(i.hsn?'<small>HSN/SAC '+esc(i.hsn)+'</small>':'')+'</td>'+
+        '<td class="rt mono">'+(i.qty%1?i.qty:i.qty.toFixed(0))+'</td>'+
+        '<td class="rt mono">'+fmt(i.rate,c)+'</td>'+
+        '<td class="rt mono">'+fmt(i.amt,c)+'</td></tr>';
+    }).join('') || '<tr><td colspan="5" style="color:var(--muted);padding:18px 0">Add a line item to begin.</td></tr>';
+
+    var taxLines='';
+    if(type==='intra'){
+      taxLines='<div class="l"><span>CGST @ '+(rate/2)+'%</span><b class="mono">'+fmt(tax/2,c)+'</b></div>'+
+               '<div class="l"><span>SGST @ '+(rate/2)+'%</span><b class="mono">'+fmt(tax/2,c)+'</b></div>';
+    } else if(type==='inter'){
+      taxLines='<div class="l"><span>IGST @ '+rate+'%</span><b class="mono">'+fmt(tax,c)+'</b></div>';
+    } else if(type==='flat'){
+      taxLines='<div class="l"><span>Tax @ '+rate+'%</span><b class="mono">'+fmt(tax,c)+'</b></div>';
+    }
+
+    var p=$('paper');
+    p.className = bw?'bw':'';
+    p.innerHTML=
+      '<div class="hdr">'+
+        (logoData?'<div class="logo"><img src="'+logoData+'" style="height:'+$('logoH').value+'px;max-width:220px'+(bw?';filter:grayscale(1)':'')+'"></div>':'')+
+        '<div class="co">'+
+          '<h3>'+(esc($('fromName').value)||'Your business')+'</h3>'+
+          '<div class="addr">'+esc($('fromAddr').value)+'</div>'+
+          // tax IDs on one line, contact details on the next, so a logo
+          // squeezing this column never pushes text past the page edge
+          '<div class="meta">'+
+            line([$('fromGst').value?'GSTIN '+esc($('fromGst').value):'',
+                  $('fromPan').value?'PAN / IEC '+esc($('fromPan').value):''])+
+            line([esc($('fromPhone').value),esc($('fromMail').value)])+
+          '</div>'+
+        '</div>'+
+        '<div class="title"><div class="word">'+D.word+'</div><div class="sub">'+
+          'No. <b>'+(esc($('invNo').value)||'—')+'</b><br>'+
+          D.dateK+' <b>'+dmy($('invDate').value)+'</b><br>'+
+          D.dueK+' <b>'+dmy($('dueDate').value)+'</b>'+
+          ($('poNo').value?'<br>'+D.refK+' <b>'+esc($('poNo').value)+'</b>':'')+
+        '</div></div>'+
+      '</div>'+
+      '<div class="band'+(bw?' bw':'')+'">'+bands+'</div>'+
+      '<div class="parties">'+
+        '<div class="pt"><div class="k">'+D.partyK+'</div><div class="n">'+(esc($('toName').value)||'Client name')+'</div>'+
+          '<div class="a">'+esc($('toAddr').value)+'</div>'+
+          ($('toGst').value?'<div class="g">GSTIN '+esc($('toGst').value)+'</div>':'')+
+          ($('shipTo').value?'<div class="k" style="margin-top:14px">'+D.shipK+'</div><div class="a">'+esc($('shipTo').value)+'</div>':'')+'</div>'+
+        '<div class="pt"><div class="k">'+D.posK+'</div><div class="n" style="font-weight:400;font-size:12px">'+(esc($('pos').value)||'—')+'</div>'+
+          '<div class="k" style="margin-top:14px">'+D.amtK+'</div>'+
+          '<div class="n mono" style="font-size:16px">'+c.sym+' '+fmt(total,c)+'</div></div>'+
+      '</div>'+
+      '<table class="li"><thead><tr><th></th><th>Description</th><th class="rt">Qty</th><th class="rt">Rate ('+c.code+')</th><th class="rt">Amount</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+      '<div class="foot">'+
+        '<div class="notes">'+
+          ($('bank').value?'<div class="k">Payment details</div><p>'+esc($('bank').value)+'</p>':'')+
+          ($('terms').value?'<div class="k">Notes &amp; terms</div><p>'+esc($('terms').value)+'</p>':'')+
+        '</div>'+
+        '<div class="tot">'+
+          '<div class="l"><span>Subtotal</span><b class="mono">'+fmt(sub,c)+'</b></div>'+
+          (disc?'<div class="l"><span>Discount</span><b class="mono">− '+fmt(disc,c)+'</b></div>':'')+
+          (disc?'<div class="l"><span>Taxable value</span><b class="mono">'+fmt(taxable,c)+'</b></div>':'')+
+          taxLines+
+          (ship?'<div class="l"><span>Shipping / other</span><b class="mono">'+fmt(ship,c)+'</b></div>':'')+
+          (Math.abs(roundAdj)>0.004?'<div class="l"><span>Round off</span><b class="mono">'+(roundAdj<0?'− ':'+ ')+fmt(Math.abs(roundAdj),c)+'</b></div>':'')+
+          '<div class="grand"><span>Total ('+c.code+')</span><b>'+c.sym+' '+fmt(total,c)+'</b></div>'+
+        '</div>'+
+      '</div>'+
+      '<div class="words"><div class="k">Amount in words</div><b>'+amountInWords(total,c)+'</b></div>'+
+      auth(c,total,D)+
+      '<div class="sign"><div class="line">'+(esc($('signLabel').value)||'Authorised signatory')+'</div></div>'+
+      '<div class="stamp"><span>'+(esc($('fromName').value)||'')+'</span><span>'+D.word+' '+(esc($('invNo').value)||'')+'</span></div>';
+    drawQR();
+  }
+
+  /* Canonical string -> fingerprint. Every field that affects money or
+     identity goes in, in a fixed order, so the same invoice always
+     produces the same code and any edit produces a different one.      */
+  var lastQR='';
+  function auth(c,total,D){
+    if(!$('sysGen').checked && !$('showHash').checked && !$('showQR').checked){ lastQR=''; return ''; }
+    var items=readItems().map(function(i){ return i.desc+'|'+i.qty+'|'+i.rate; }).join(';');
+    var canon=[D.word,$('invNo').value,$('invDate').value,$('dueDate').value,
+               $('fromName').value,$('fromGst').value,$('toName').value,$('toGst').value,
+               items,$('taxType').value,$('taxRate').value,$('discVal').value,$('shipVal').value,
+               c.code,total.toFixed(2)].join('~');
+    var hash=sha256(canon);
+    var pretty=hash.slice(0,24).toUpperCase().replace(/(.{4})/g,'$1-').replace(/-$/,'');
+    lastQR = $('showQR').checked ? [
+      $('fromName').value, D.word+' '+$('invNo').value, 'Date '+dmy($('invDate').value),
+      'Total '+c.code+' '+total.toFixed(2), 'SHA256 '+hash.slice(0,32)
+    ].join('\n') : '';
+    return '<div class="auth">'+
+      ($('showQR').checked?'<div class="qr" id="qrbox"></div>':'')+
+      '<div class="body">'+
+        ($('showHash').checked?'<div class="k">Document verification code (SHA-256)</div><div class="code">'+pretty+'</div>':'')+
+        ($('sysGen').checked?'<div class="sys">'+esc($('sysText').value)+'</div>':'')+
+      '</div></div>';
+  }
+
+  // draw the QR after the sheet HTML is rebuilt; skipped if the CDN is blocked
+  function drawQR(){
+    var box=$('qrbox'); if(!box||!lastQR) return;
+    if(typeof qrcode==='undefined'){ box.style.display='none'; return; }
+    try{ var q=qrcode(0,'M'); q.addData(lastQR); q.make(); box.innerHTML=q.createImgTag(4,0); }
+    catch(e){ box.style.display='none'; }
+  }
+
+  /* ---------- events --------------------------------------------------
+     One delegated listener on the whole editor means any new field you
+     add is picked up automatically — no wiring needed.               */
+  $('editor').addEventListener('input',render);
+  $('editor').addEventListener('change',function(e){
+    if(e.target.id==='pageSize'){
+      var L=e.target.value==='letter';
+      document.documentElement.style.setProperty('--paper-w',L?'816px':'794px');
+      document.documentElement.style.setProperty('--paper-h',L?'1056px':'1123px');
+      $('sizeTag').textContent=L?'US Letter':'A4';
+    }
+    render();
+  });
+  $('addItem').addEventListener('click',function(){ $('items').appendChild(itemRow()); render(); });
+
+  var curDoc='invoice';
+  function applyDocType(){
+    var k=$('docType').value, D=DOC[k], P=DOC[curDoc];
+    $('partyHead').textContent=D.head; $('lblToName').textContent=D.nameL;
+    $('lblNo').textContent=D.noL; $('lblDate').textContent=D.dateL; $('lblDue').textContent=D.dueL;
+    $('lblPos').textContent=D.posK; $('lblShip').textContent=D.shipK+' (optional)';
+    $('poNo').previousElementSibling.textContent=D.refK;
+    // only replace values the user has not customised
+    if($('invNo').value===P.prefix+'001') $('invNo').value=D.prefix+'001';
+    if($('terms').value===P.terms) $('terms').value=D.terms;
+    if($('signLabel').value===P.sign) $('signLabel').value=D.sign;
+    curDoc=k; render();
+  }
+  $('docType').addEventListener('change',applyDocType);
+  $('drop').addEventListener('click',function(){ $('logoFile').click(); });
+  $('logoFile').addEventListener('change',function(e){
+    var f=e.target.files[0]; if(!f) return;
+    var r=new FileReader();
+    r.onload=function(){ logoData=r.result; $('thumbImg').src=logoData; $('thumb').style.display='flex';
+      $('drop').querySelector('span').textContent=f.name;
+      if(/svg/i.test(f.type)) $('status').textContent='SVG logos sometimes drop out of Download PDF — check the file, and use a PNG if the logo is missing.';
+      render(); };
+    r.readAsDataURL(f);
+  });
+  $('logoClear').addEventListener('click',function(){ logoData=''; $('logoFile').value='';
+    $('thumb').style.display='none'; $('drop').querySelector('span').textContent='Choose a logo file (PNG, JPG or SVG)'; render(); });
+
+  var zoom=0.8;
+  function applyZoom(){ $('scaler').style.transform='scale('+zoom+')'; $('zLvl').textContent=Math.round(zoom*100)+'%';
+    $('scaler').style.height=($('paper').offsetHeight*zoom)+'px'; }
+  $('zIn').addEventListener('click',function(){ zoom=Math.min(1.4,zoom+0.1); applyZoom(); });
+  $('zOut').addEventListener('click',function(){ zoom=Math.max(0.4,zoom-0.1); applyZoom(); });
+
+  $('printBtn').addEventListener('click',function(){ window.print(); });
+  /* [EDIT-PDF] Download PDF clones the sheet at 100% zoom into an
+     off-screen box (so the on-screen zoom never affects output), hands
+     it to html2pdf, then removes the clone. If the CDN script is
+     blocked it falls back to the browser print dialog.              */
+  $('dlPdf').addEventListener('click',function(){
+    var name=($('fname').value||(DOC[$('docType').value].word.replace(/ /g,'-')+'-'+($('invNo').value||'draft'))).replace(/[^\w\-. ]/g,'')+'.pdf';
+    if(typeof html2pdf==='undefined'){ $('status').textContent='PDF library unavailable — use Print / Save as PDF instead.'; window.print(); return; }
+    $('status').textContent='Building '+name+'…';
+    var clone=$('paper').cloneNode(true);
+    var holder=document.createElement('div');
+    holder.style.cssText='position:fixed;left:-9999px;top:0;background:#fff';
+    clone.style.boxShadow='none'; holder.appendChild(clone); document.body.appendChild(holder);
+    html2pdf().set({
+      margin:0, filename:name,
+      image:{type:'jpeg',quality:0.98},
+      html2canvas:{scale:parseFloat($('pdfQ').value),useCORS:true,backgroundColor:'#ffffff'},
+      jsPDF:{unit:'mm',format:$('pageSize').value,orientation:'portrait'},
+      pagebreak:{mode:['css','legacy']}
+    }).from(clone).save().then(function(){
+      holder.remove(); $('status').textContent='Saved '+name;
+    }).catch(function(){
+      holder.remove(); $('status').textContent='Download failed — use Print / Save as PDF instead.';
+    });
+  });
+
+  /* ---------- init ----------------------------------------------------
+     Runs once on load: today's date, due date +15 days, and two sample
+     line items. Delete the two lines below to start with an empty row. */
+  var t=new Date(), d=new Date(t.getTime()+15*864e5);
+  var iso=function(x){ return x.toISOString().slice(0,10); };
+  $('invDate').value=iso(t); $('dueDate').value=iso(d);
+  [{desc:'Multispectral drone survey — 100 acres',hsn:'998719',qty:100,rate:450},
+   {desc:'NDVI / vegetation analytics report',hsn:'998313',qty:1,rate:15000}]
+   .forEach(function(x){ $('items').appendChild(itemRow(x)); });
+  render(); applyZoom();
+  window.addEventListener('resize',applyZoom);
+  new MutationObserver(applyZoom).observe($('paper'),{childList:true});
+})();
+</script>
+</body>
+</html>
